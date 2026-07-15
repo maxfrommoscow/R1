@@ -176,20 +176,29 @@ function dateKeyToNumber(dateKey) {
   return year * 10000 + month * 100 + day;
 }
 
-async function sendNtfy(env, title, message, priority = "urgent") {
+export async function sendNtfy(env, title, message, priority = "urgent") {
   if (!env.NTFY_TOPIC) throw new Error("NTFY_TOPIC secret is missing");
-  const response = await fetch(`https://ntfy.sh/${encodeURIComponent(env.NTFY_TOPIC)}`, {
+  const response = await fetch("https://ntfy.sh", {
     method: "POST",
-    headers: {
-      Title: title,
-      Priority: priority,
-      Tags: "rotating_light,car",
-      Click: BOOKING_URL,
-      Actions: `view, Open GoSwift, ${BOOKING_URL}, clear=true`,
-    },
-    body: message,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: env.NTFY_TOPIC,
+      title,
+      message,
+      priority,
+      tags: ["rotating_light", "car"],
+      click: BOOKING_URL,
+      actions: [
+        { action: "view", label: "Open GoSwift", url: BOOKING_URL, clear: true },
+      ],
+    }),
   });
-  if (!response.ok) throw new Error(`Notification service returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const details = (await response.text()).slice(0, 300);
+    throw new Error(
+      `Notification service returned HTTP ${response.status}${details ? `: ${details}` : ""}`,
+    );
+  }
 }
 
 export async function runCheck(env) {
@@ -318,8 +327,15 @@ export default {
       if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
         return new Response("Unauthorized", { status: 401 });
       }
-      await sendNtfy(env, "GoSwift monitor test", "Notifications are configured correctly.", "high");
-      return new Response("Test notification sent");
+      try {
+        await sendNtfy(env, "GoSwift monitor test", "Notifications are configured correctly.", "high");
+        return Response.json({ ok: true, message: "Test notification sent" });
+      } catch (error) {
+        return Response.json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }, { status: 502 });
+      }
     }
     return monitorStub(env).fetch("https://monitor.internal/status");
   },
