@@ -3,6 +3,7 @@
   "name": "goswift-slot-monitor",
   "main": "src/index.js",
   "compatibility_date": "2026-07-15",
+  "keep_vars": true,
   "durable_objects": {
     "bindings": [
       {
