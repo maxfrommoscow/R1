@@ -1,0 +1,23 @@
+{
+  "name": "goswift-slot-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js && node --test test/monitor.test.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "cloudflare": {
+    "bindings": {
+      "NTFY_TOPIC": {
+        "description": "Private ntfy topic for urgent iPhone/Android notifications. Paste the value supplied in the setup instructions."
+      },
+      "ADMIN_KEY": {
+        "description": "Private key protecting the start, stop, manual-check, and notification-test URLs. Paste the value supplied in the setup instructions."
+      }
+    }
+  },
+  "devDependencies": {
+    "wrangler": "^4.111.0"
+  }
+}
