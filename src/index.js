@@ -4,6 +4,7 @@ const POINTS = [
   { id: "2", name: "Koidula" },
   { id: "3", name: "Luhamaa" },
 ];
+const DEFAULT_TARGET_DATES = ["13.08.2026", "14.08.2026", "15.08.2026"];
 
 const state = {
   sessions: new Map(),
@@ -147,17 +148,25 @@ async function loadSlots(point, targetDate, retry = true) {
 export async function checkPoint(point, targetDate) {
   try {
     const slots = await loadSlots(point, targetDate);
-    return { point: point.name, pointId: point.id, slots, ok: true };
+    return { point: point.name, pointId: point.id, targetDate, slots, ok: true };
   } catch (error) {
     state.sessions.delete(point.id);
     return {
       point: point.name,
       pointId: point.id,
+      targetDate,
       slots: [],
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function targetDatesFromEnv(env) {
+  const configured = typeof env.TARGET_DATES === "string"
+    ? env.TARGET_DATES.split(",").map((date) => date.trim()).filter(Boolean)
+    : [];
+  return configured.length ? [...new Set(configured)] : DEFAULT_TARGET_DATES;
 }
 
 function tallinnDateKey(now = new Date()) {
@@ -279,27 +288,40 @@ async function sendNotification(env, telegramChatId, title, message, priority = 
 }
 
 export async function runCheck(env, options = {}) {
-  const targetDate = env.TARGET_DATE || "14.08.2026";
+  const targetDates = targetDatesFromEnv(env);
   const today = tallinnDateKey();
-  if (dateKeyToNumber(today) > dateKeyToNumber(targetDate)) {
-    return { skipped: true, reason: "Target date has passed", targetDate };
+  const activeTargetDates = targetDates.filter(
+    (targetDate) => dateKeyToNumber(today) <= dateKeyToNumber(targetDate),
+  );
+  if (activeTargetDates.length === 0) {
+    return { skipped: true, reason: "Target dates have passed", targetDates };
   }
 
-  const results = await Promise.all(POINTS.map((point) => checkPoint(point, targetDate)));
+  const results = (await Promise.all(POINTS.map(async (point) => {
+    const pointResults = [];
+    for (const targetDate of activeTargetDates) {
+      pointResults.push(await checkPoint(point, targetDate));
+    }
+    return pointResults;
+  }))).flat();
   state.lastCheckedAt = new Date().toISOString();
   state.lastResults = results;
 
   const available = results.filter((result) => result.slots.length > 0);
   if (available.length > 0) {
-    const fingerprint = available.map((result) => `${result.point}:${result.slots.join(",")}`).join("|");
+    const fingerprint = available
+      .map((result) => `${result.targetDate}:${result.point}:${result.slots.join(",")}`)
+      .join("|");
     const now = Date.now();
     const shouldRepeat = now - state.lastAlertAt >= 3 * 60 * 1000;
     if (fingerprint !== state.lastAlertFingerprint || shouldRepeat) {
-      const lines = available.map((result) => `${result.point}: ${result.slots.join(", ")}`);
+      const lines = available.map(
+        (result) => `${result.targetDate} — ${result.point}: ${result.slots.join(", ")}`,
+      );
       await sendNotification(
         env,
         options.telegramChatId,
-        `GoSwift: FREE SLOT ${targetDate}`,
+        "GoSwift: FREE BORDER SLOT",
         `A slot from Estonia to Russia is available.\n${lines.join("\n")}\nBook immediately: ${BOOKING_URL}`,
       );
       state.lastAlertFingerprint = fingerprint;
@@ -309,7 +331,7 @@ export async function runCheck(env, options = {}) {
     state.lastAlertFingerprint = null;
   }
 
-  return { checkedAt: state.lastCheckedAt, targetDate, results };
+  return { checkedAt: state.lastCheckedAt, targetDates, results };
 }
 
 export class MonitorCoordinator {
@@ -415,7 +437,7 @@ export class MonitorCoordinator {
     return Response.json({
       service: "GoSwift slot monitor",
       direction: "Estonia -> Russia",
-      targetDate: this.env.TARGET_DATE || "14.08.2026",
+      targetDates: targetDatesFromEnv(this.env),
       frequency: "Every 60 seconds",
       running,
       nextAlarmAt: alarm ? new Date(alarm).toISOString() : null,
