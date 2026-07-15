@@ -178,27 +178,53 @@ function dateKeyToNumber(dateKey) {
 
 export async function sendNtfy(env, title, message, priority = "urgent") {
   if (!env.NTFY_TOPIC) throw new Error("NTFY_TOPIC secret is missing");
-  const response = await fetch("https://ntfy.sh", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      topic: env.NTFY_TOPIC,
-      title,
-      message,
-      priority,
-      tags: ["rotating_light", "car"],
-      click: BOOKING_URL,
-      actions: [
-        { action: "view", label: "Open GoSwift", url: BOOKING_URL, clear: true },
-      ],
-    }),
-  });
-  if (!response.ok) {
-    const details = (await response.text()).slice(0, 300);
-    throw new Error(
-      `Notification service returned HTTP ${response.status}${details ? `: ${details}` : ""}`,
-    );
+  const payload = {
+    topic: env.NTFY_TOPIC,
+    title,
+    message,
+    priority,
+    tags: ["rotating_light", "car"],
+    click: BOOKING_URL,
+    actions: [
+      { action: "view", label: "Open GoSwift", url: BOOKING_URL, clear: true },
+    ],
+  };
+  const retryDelays = [0, 1_000, 3_000, 7_000];
+  let lastError = "Unknown notification error";
+
+  for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+    if (retryDelays[attempt]) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
+    }
+
+    try {
+      const useJsonApi = attempt % 2 === 0;
+      const response = await fetch(
+        useJsonApi ? "https://ntfy.sh" : `https://ntfy.sh/${encodeURIComponent(env.NTFY_TOPIC)}`,
+        useJsonApi ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        } : {
+          method: "POST",
+          headers: {
+            Title: title,
+            Priority: priority,
+            Tags: "rotating_light,car",
+            Click: BOOKING_URL,
+          },
+          body: message,
+        },
+      );
+      if (response.ok) return;
+      const details = (await response.text()).slice(0, 300);
+      lastError = `HTTP ${response.status}${details ? `: ${details}` : ""}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
   }
+
+  throw new Error(`Notification service failed after ${retryDelays.length} attempts: ${lastError}`);
 }
 
 export async function runCheck(env) {
@@ -264,6 +290,24 @@ export class MonitorCoordinator {
     if (!running) return;
     const cycleStartedAt = Date.now();
     try {
+      const notificationTestVersion = "ntfy-retry-v1";
+      if (await this.ctx.storage.get("notificationTestVersion") !== notificationTestVersion) {
+        try {
+          await sendNtfy(
+            this.env,
+            "GoSwift monitor is active",
+            "Cloud monitoring and push notifications are working.",
+            "high",
+          );
+          await this.ctx.storage.put("notificationTestVersion", notificationTestVersion);
+          await this.ctx.storage.delete("lastNotificationError");
+        } catch (error) {
+          await this.ctx.storage.put(
+            "lastNotificationError",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
       await this.executeCheck();
     } finally {
       if (await this.ctx.storage.get("running")) {
@@ -292,6 +336,7 @@ export class MonitorCoordinator {
     const running = Boolean(await this.ctx.storage.get("running"));
     const alarm = await this.ctx.storage.getAlarm();
     const lastStatus = await this.ctx.storage.get("lastStatus");
+    const lastNotificationError = await this.ctx.storage.get("lastNotificationError");
     return Response.json({
       service: "GoSwift slot monitor",
       direction: "Estonia -> Russia",
@@ -300,6 +345,7 @@ export class MonitorCoordinator {
       running,
       nextAlarmAt: alarm ? new Date(alarm).toISOString() : null,
       lastStatus: lastStatus || null,
+      lastNotificationError: lastNotificationError || null,
     }, { headers: { "Cache-Control": "no-store" } });
   }
 }
