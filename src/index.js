@@ -308,24 +308,43 @@ function monitorStub(env) {
   return env.MONITOR.get(env.MONITOR.idFromName("main"));
 }
 
+function isAuthorized(url, env) {
+  const supplied = url.searchParams.get("key") || "";
+  const configured = typeof env.ADMIN_KEY === "string" ? env.ADMIN_KEY : "";
+  return Boolean(configured) && supplied.trim() === configured.trim();
+}
+
+function unauthorizedResponse(url, env) {
+  const supplied = url.searchParams.get("key") || "";
+  const configured = typeof env.ADMIN_KEY === "string" ? env.ADMIN_KEY : "";
+  return Response.json({
+    ok: false,
+    error: "Unauthorized",
+    keyProvided: Boolean(supplied),
+    providedLength: supplied.trim().length,
+    adminKeyConfigured: Boolean(configured),
+    configuredLength: configured.trim().length,
+  }, { status: 401 });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/check") {
-      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
-        return new Response("Unauthorized", { status: 401 });
+      if (!isAuthorized(url, env)) {
+        return unauthorizedResponse(url, env);
       }
       return monitorStub(env).fetch("https://monitor.internal/run", { method: "POST" });
     }
     if (url.pathname === "/start" || url.pathname === "/stop") {
-      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
-        return new Response("Unauthorized", { status: 401 });
+      if (!isAuthorized(url, env)) {
+        return unauthorizedResponse(url, env);
       }
       return monitorStub(env).fetch(`https://monitor.internal${url.pathname}`, { method: "POST" });
     }
     if (url.pathname === "/test-notification") {
-      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
-        return new Response("Unauthorized", { status: 401 });
+      if (!isAuthorized(url, env)) {
+        return unauthorizedResponse(url, env);
       }
       try {
         await sendNtfy(env, "GoSwift monitor test", "Notifications are configured correctly.", "high");
