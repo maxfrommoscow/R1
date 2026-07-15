@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "goswift-august-14-monitor",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-15",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MONITOR",
+        "class_name": "MonitorCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MonitorCoordinator"]
+    }
+  ],
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "vars": {
+    "TARGET_DATE": "14.08.2026"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
