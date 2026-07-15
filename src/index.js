@@ -227,7 +227,58 @@ export async function sendNtfy(env, title, message, priority = "urgent") {
   throw new Error(`Notification service failed after ${retryDelays.length} attempts: ${lastError}`);
 }
 
-export async function runCheck(env) {
+async function telegramApi(env, method, body) {
+  if (!env.TELEGRAM_BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN secret is missing");
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: body ? "POST" : "GET",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.ok) {
+    throw new Error(`Telegram ${method} failed: ${data?.description || `HTTP ${response.status}`}`);
+  }
+  return data.result;
+}
+
+async function discoverTelegramChat(env) {
+  const updates = await telegramApi(env, "getUpdates?limit=20&timeout=0");
+  const privateMessages = updates.filter((update) => update.message?.chat?.type === "private");
+  return privateMessages.length ? privateMessages[privateMessages.length - 1].message.chat.id : null;
+}
+
+export async function sendTelegram(env, chatId, title, message) {
+  await telegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: `${title}\n\n${message}`,
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [[{ text: "Open GoSwift", url: BOOKING_URL }]],
+    },
+  });
+}
+
+async function sendNotification(env, telegramChatId, title, message, priority = "urgent") {
+  let telegramError = null;
+  if (env.TELEGRAM_BOT_TOKEN && telegramChatId) {
+    try {
+      await sendTelegram(env, telegramChatId, title, message);
+      return "telegram";
+    } catch (error) {
+      telegramError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  try {
+    await sendNtfy(env, title, message, priority);
+    return "ntfy";
+  } catch (error) {
+    const ntfyError = error instanceof Error ? error.message : String(error);
+    throw new Error(telegramError ? `${telegramError}; ${ntfyError}` : ntfyError);
+  }
+}
+
+export async function runCheck(env, options = {}) {
   const targetDate = env.TARGET_DATE || "14.08.2026";
   const today = tallinnDateKey();
   if (dateKeyToNumber(today) > dateKeyToNumber(targetDate)) {
@@ -245,8 +296,9 @@ export async function runCheck(env) {
     const shouldRepeat = now - state.lastAlertAt >= 3 * 60 * 1000;
     if (fingerprint !== state.lastAlertFingerprint || shouldRepeat) {
       const lines = available.map((result) => `${result.point}: ${result.slots.join(", ")}`);
-      await sendNtfy(
+      await sendNotification(
         env,
+        options.telegramChatId,
         `GoSwift: FREE SLOT ${targetDate}`,
         `A slot from Estonia to Russia is available.\n${lines.join("\n")}\nBook immediately: ${BOOKING_URL}`,
       );
@@ -269,7 +321,8 @@ export class MonitorCoordinator {
   async executeCheck() {
     const startedAt = new Date().toISOString();
     try {
-      const result = await runCheck(this.env);
+      const telegramChatId = await this.ctx.storage.get("telegramChatId");
+      const result = await runCheck(this.env, { telegramChatId });
       const status = { running: true, startedAt, ...result };
       await this.ctx.storage.put("lastStatus", status);
       return status;
@@ -290,11 +343,32 @@ export class MonitorCoordinator {
     if (!running) return;
     const cycleStartedAt = Date.now();
     try {
-      const notificationTestVersion = "ntfy-retry-v1";
-      if (await this.ctx.storage.get("notificationTestVersion") !== notificationTestVersion) {
+      let telegramChatId = await this.ctx.storage.get("telegramChatId");
+      if (this.env.TELEGRAM_BOT_TOKEN && !telegramChatId) {
         try {
-          await sendNtfy(
+          telegramChatId = await discoverTelegramChat(this.env);
+          if (telegramChatId) await this.ctx.storage.put("telegramChatId", telegramChatId);
+        } catch (error) {
+          await this.ctx.storage.put(
+            "lastNotificationError",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      const notificationTestVersion = this.env.TELEGRAM_BOT_TOKEN
+        ? "telegram-v1"
+        : "ntfy-retry-v1";
+      if (this.env.TELEGRAM_BOT_TOKEN && !telegramChatId) {
+        await this.ctx.storage.put(
+          "lastNotificationError",
+          "Telegram bot is waiting for a private /start message",
+        );
+      } else if (await this.ctx.storage.get("notificationTestVersion") !== notificationTestVersion) {
+        try {
+          await sendNotification(
             this.env,
+            telegramChatId,
             "GoSwift monitor is active",
             "Cloud monitoring and push notifications are working.",
             "high",
@@ -337,6 +411,7 @@ export class MonitorCoordinator {
     const alarm = await this.ctx.storage.getAlarm();
     const lastStatus = await this.ctx.storage.get("lastStatus");
     const lastNotificationError = await this.ctx.storage.get("lastNotificationError");
+    const telegramChatId = await this.ctx.storage.get("telegramChatId");
     return Response.json({
       service: "GoSwift slot monitor",
       direction: "Estonia -> Russia",
@@ -346,6 +421,8 @@ export class MonitorCoordinator {
       nextAlarmAt: alarm ? new Date(alarm).toISOString() : null,
       lastStatus: lastStatus || null,
       lastNotificationError: lastNotificationError || null,
+      telegramConfigured: Boolean(this.env.TELEGRAM_BOT_TOKEN),
+      telegramConnected: Boolean(telegramChatId),
     }, { headers: { "Cache-Control": "no-store" } });
   }
 }
